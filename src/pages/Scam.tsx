@@ -30,10 +30,23 @@ export default function Scam() {
     return () => clearTimeout(t)
   }, [state])
 
-  const run = () => {
+  const run = async () => {
     if (text.trim().length < 8) return setState('error')
-    setResult(analyze(text, mode))
     setState('analyzing')
+    try {
+      const res = await fetch('/api/scam/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, content: text.trim() }),
+      })
+      if (!res.ok) throw new Error('Analysis failed')
+      const data = await res.json()
+      setResult({ hits: data.hits || [], level: data.level || 'None found' })
+      setState('results')
+    } catch {
+      setResult(analyze(text, mode))
+      setState('results')
+    }
   }
 
   const demo = (s: State) => {

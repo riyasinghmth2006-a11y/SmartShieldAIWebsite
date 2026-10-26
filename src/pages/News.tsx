@@ -15,9 +15,25 @@ export default function News() {
     return () => clearTimeout(t)
   }, [state])
 
-  const run = () => {
+  const run = async () => {
     if (text.trim().length < 20) return setState('error')
     setState('analyzing')
+    try {
+      const res = await fetch('/api/fake-news/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text.trim() }),
+      })
+      if (!res.ok) throw new Error('Request failed')
+      const data = await res.json()
+      if (data.status === 'completed' && data.label) {
+        setState('results')
+      } else {
+        setState('unavailable')
+      }
+    } catch {
+      setState('unavailable')
+    }
   }
   const demo = (s: State) => {
     if (s === 'empty') setText('')

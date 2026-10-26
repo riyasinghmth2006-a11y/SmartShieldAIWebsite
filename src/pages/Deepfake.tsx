@@ -3,16 +3,15 @@ import { I, Ic, Shield3D } from '../components/Visuals'
 
 type State = 'empty' | 'selected' | 'analyzing' | 'results' | 'error'
 type ErrKind = 'type' | 'size' | 'unsupported' | 'model'
-type Picked = { name: string; kind: 'image' | 'video'; ext: string; size: string; url?: string }
+type Picked = { name: string; kind: 'image'; ext: string; size: string; url?: string }
 
 const IMG = ['png', 'jpg', 'jpeg', 'webp']
-const VID = ['mp4', 'mov', 'webm']
 const DISCLAIMER = 'AI media detection is imperfect. Results are indicators, not definitive proof of authenticity or manipulation.'
 
 const ERRORS: Record<ErrKind, { t: string; d: string }> = {
-  type: { t: 'Invalid file type', d: 'This file is not one of the listed formats. Choose a PNG, JPG, JPEG, WEBP, MP4, MOV, or WEBM file.' },
+  type: { t: 'Invalid file type', d: 'This file is not one of the listed formats. Choose a PNG, JPG, JPEG, or WEBP file.' },
   size: { t: 'File too large', d: 'Shown only once a size limit is configured. The limit will be confirmed during implementation.' },
-  unsupported: { t: 'Unsupported media', d: 'The file could not be read as a valid image or video. It may be corrupted or use an unsupported codec.' },
+  unsupported: { t: 'Unsupported media', d: 'The file could not be read as a valid image. It may be corrupted or use an unsupported format.' },
   model: { t: 'Analysis unavailable', d: 'No deepfake detection model is configured, so no analysis can be run and no result will be invented.' },
 }
 
@@ -21,10 +20,9 @@ const fmt = (b: number) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${
 function Frame({ file, scanning }: { file: Picked | null; scanning?: boolean }) {
   return (
     <div className="relative aspect-video w-full overflow-hidden rounded-2xl border border-cyan/30 bg-bg/80">
-      {file?.url && file.kind === 'image' && <img src={file.url} alt="Selected file preview" className="h-full w-full object-contain" />}
-      {file?.url && file.kind === 'video' && <video src={file.url} className="h-full w-full object-contain" muted />}
+      {file?.url && <img src={file.url} alt="Selected file preview" className="h-full w-full object-contain" />}
       {file && !file.url && (
-        <div className="grid h-full place-items-center text-mute"><Ic d={file.kind === 'video' ? I.media : I.media} size={44} /></div>
+        <div className="grid h-full place-items-center text-mute"><Ic d={I.media} size={44} /></div>
       )}
       {scanning && (
         <>
@@ -43,56 +41,82 @@ function Frame({ file, scanning }: { file: Picked | null; scanning?: boolean }) 
 export default function Deepfake() {
   const [state, setState] = useState<State>('empty')
   const [file, setFile] = useState<Picked | null>(null)
+  const [rawFile, setRawFile] = useState<File | null>(null)
   const [err, setErr] = useState<ErrKind>('type')
   const [drag, setDrag] = useState(false)
   const imgRef = useRef<HTMLInputElement>(null)
-  const vidRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (state !== 'analyzing') return
-    const t = setTimeout(() => {
-      setErr('model')
-      setState('error')
-    }, 2200)
-    return () => clearTimeout(t)
-  }, [state])
 
   useEffect(() => () => { if (file?.url) URL.revokeObjectURL(file.url) }, [file])
 
   const pick = (f?: File) => {
     if (!f) return
     const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
-    if (![...IMG, ...VID].includes(ext)) {
+    if (!IMG.includes(ext)) {
       setFile(null)
+      setRawFile(null)
       setErr('type')
       return setState('error')
     }
-    setFile({ name: f.name, ext: ext.toUpperCase(), kind: IMG.includes(ext) ? 'image' : 'video', size: fmt(f.size), url: URL.createObjectURL(f) })
+    setRawFile(f)
+    setFile({ name: f.name, ext: ext.toUpperCase(), kind: 'image', size: fmt(f.size), url: URL.createObjectURL(f) })
     setState('selected')
   }
   const clear = () => {
     setFile(null)
+    setRawFile(null)
     setState('empty')
+  }
+  const analyzeMedia = async () => {
+    if (!file) return
+    setState('analyzing')
+    try {
+      if (rawFile) {
+        const formData = new FormData()
+        formData.append('file', rawFile)
+        const res = await fetch('/api/deepfake/analyze', {
+          method: 'POST',
+          body: formData,
+        })
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}))
+          if (errData.detail?.includes('Invalid file type')) setErr('type')
+          else if (errData.detail?.includes('File size exceeds')) setErr('size')
+          else if (errData.detail?.includes('format headers')) setErr('unsupported')
+          else setErr('model')
+          return setState('error')
+        }
+        const data = await res.json()
+        if (data.status === 'completed' && data.label) {
+          setState('results')
+        } else {
+          setErr('model')
+          setState('error')
+        }
+      } else {
+        setErr('model')
+        setState('error')
+      }
+    } catch {
+      setErr('model')
+      setState('error')
+    }
   }
   const demo = (s: State, e?: ErrKind) => {
     if (e) setErr(e)
-    if (s === 'empty') setFile(null)
-    else if (!file) setFile({ name: 'filename.ext', kind: 'image', ext: 'PNG', size: '—' })
+    if (s === 'empty') { setFile(null); setRawFile(null) }
+    else if (!file) setFile({ name: 'filename.png', kind: 'image', ext: 'PNG', size: '—' })
     setState(s)
   }
 
   const inputs = (
-    <>
-      <input ref={imgRef} type="file" hidden accept=".png,.jpg,.jpeg,.webp" onChange={(e) => { pick(e.target.files?.[0]); e.target.value = '' }} />
-      <input ref={vidRef} type="file" hidden accept=".mp4,.mov,.webm" onChange={(e) => { pick(e.target.files?.[0]); e.target.value = '' }} />
-    </>
+    <input ref={imgRef} type="file" hidden accept=".png,.jpg,.jpeg,.webp" onChange={(e) => { pick(e.target.files?.[0]); e.target.value = '' }} />
   )
-  const replace = () => (file?.kind === 'video' ? vidRef : imgRef).current?.click()
+  const replace = () => imgRef.current?.click()
 
   return (
     <div className="fadeup">
       <h1 className="text-4xl font-extrabold tracking-tight md:text-5xl">Deepfake Detector</h1>
-      <p className="mt-3 text-lg text-mute">Inspect images and videos for potential signs of AI-generated or manipulated media.</p>
+      <p className="mt-3 text-lg text-mute">Inspect images for potential signs of AI-generated or manipulated media.</p>
       <p className="mt-4 inline-flex items-center gap-2 rounded-full border border-violet/40 bg-violet/10 px-4 py-1.5 text-xs font-bold tracking-wider text-violet">
         PROTOTYPE · PLANNED CAPABILITY. NOT YET CONFIRMED BY IMPLEMENTATION
       </p>
@@ -108,15 +132,13 @@ export default function Deepfake() {
               className={`flex flex-col items-center rounded-2xl border-2 border-dashed px-6 py-12 text-center transition-colors ${drag ? 'border-cyan bg-cyan/10' : 'border-line bg-bg/40'}`}
             >
               <span className="grid h-16 w-16 place-items-center rounded-2xl bg-gradient-to-br from-blue/50 to-[#0a2a66] text-ink shadow-[0_12px_24px_-8px_rgba(22,133,255,.6)]"><Ic d={I.upload} size={30} /></span>
-              <h3 className="mt-5 text-xl font-extrabold">Drag and drop media here</h3>
+              <h3 className="mt-5 text-xl font-extrabold">Drag and drop an image here</h3>
               <p className="mt-2 text-sm text-mute">or choose a file from your device</p>
               <div className="mt-6 flex flex-col gap-3 sm:flex-row">
                 <button onClick={() => imgRef.current?.click()} className="btn-primary rounded-xl px-6 py-3.5 font-bold text-white">Upload Image</button>
-                <button onClick={() => vidRef.current?.click()} className="rounded-xl border border-line px-6 py-3.5 font-bold transition-colors hover:border-cyan/60 hover:bg-white/5">Upload Video</button>
               </div>
               <dl className="mt-7 space-y-1 text-sm text-mute">
-                <div><dt className="inline font-bold text-ink">Images: </dt><dd className="inline">PNG, JPG, JPEG, WEBP</dd></div>
-                <div><dt className="inline font-bold text-ink">Videos: </dt><dd className="inline">MP4, MOV, WEBM</dd></div>
+                <div><dt className="inline font-bold text-ink">Supported formats: </dt><dd className="inline">PNG, JPG, JPEG, WEBP</dd></div>
                 <div><dt className="inline font-bold text-ink">Max file size: </dt><dd className="inline">[to be defined by implementation]</dd></div>
               </dl>
             </div>
@@ -128,7 +150,7 @@ export default function Deepfake() {
               <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
                   <p className="truncate font-bold">{file.name}</p>
-                  <p className="text-sm text-mute">{file.kind === 'image' ? 'Image' : 'Video'} · {file.ext} · {file.size}</p>
+                  <p className="text-sm text-mute">Image · {file.ext} · {file.size}</p>
                 </div>
                 {state === 'selected' && (
                   <div className="flex gap-2 text-sm font-bold">
@@ -163,15 +185,15 @@ export default function Deepfake() {
               <div className="flex items-center gap-4">
                 <div className="w-40 shrink-0"><Frame file={file} /></div>
                 <div className="min-w-0 text-sm text-mute">
-                  <p className="font-bold text-ink">Media Summary</p>
-                  <p className="truncate">{file?.name} · {file?.kind === 'video' ? 'Video' : 'Image'} · {file?.ext} · {file?.size}</p>
+                  <p className="font-bold text-ink">Image Summary</p>
+                  <p className="truncate">{file?.name} · Image · {file?.ext} · {file?.size}</p>
                 </div>
               </div>
             </div>
           )}
 
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-            <button onClick={() => file && state !== 'analyzing' && setState('analyzing')} disabled={!file || state === 'analyzing' || state === 'results'} className="btn-primary rounded-xl px-8 py-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Analyze Media</button>
+            <button onClick={analyzeMedia} disabled={!file || state === 'analyzing' || state === 'results'} className="btn-primary rounded-xl px-8 py-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Analyze Media</button>
             <button onClick={clear} disabled={!file} className="rounded-xl border border-line px-8 py-4 font-bold transition-colors hover:border-cyan/60 disabled:cursor-not-allowed disabled:opacity-40">Clear File</button>
           </div>
         </section>

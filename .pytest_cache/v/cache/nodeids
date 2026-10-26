@@ -1,0 +1,22 @@
+[
+  "backend/tests/test_deepfake_service.py::test_api_deepfake_endpoint",
+  "backend/tests/test_deepfake_service.py::test_corrupt_magic_bytes_rejected",
+  "backend/tests/test_deepfake_service.py::test_empty_file_rejected",
+  "backend/tests/test_deepfake_service.py::test_oversized_file_rejected",
+  "backend/tests/test_deepfake_service.py::test_path_traversal_sanitized",
+  "backend/tests/test_deepfake_service.py::test_unsupported_file_extension",
+  "backend/tests/test_deepfake_service.py::test_valid_jpeg_acceptance",
+  "backend/tests/test_deepfake_service.py::test_valid_png_acceptance",
+  "backend/tests/test_fake_news_service.py::test_api_fake_news_endpoint",
+  "backend/tests/test_fake_news_service.py::test_missing_model_returns_model_unavailable",
+  "backend/tests/test_fake_news_service.py::test_mock_model_inference_when_loaded",
+  "backend/tests/test_fake_news_service.py::test_preprocessing",
+  "backend/tests/test_fake_news_service.py::test_short_news_text_rejected",
+  "backend/tests/test_scam_service.py::test_api_scam_endpoint",
+  "backend/tests/test_scam_service.py::test_benign_message_no_signals",
+  "backend/tests/test_scam_service.py::test_detect_sensitive_credential_request",
+  "backend/tests/test_scam_service.py::test_detect_suspicious_url_characteristics",
+  "backend/tests/test_scam_service.py::test_detect_unusual_payment",
+  "backend/tests/test_scam_service.py::test_detect_urgency_signal",
+  "backend/tests/test_scam_service.py::test_validation_rejects_empty_and_short"
+]
