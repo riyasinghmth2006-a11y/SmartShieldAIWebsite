@@ -1,0 +1,8 @@
+{
+  "name": "SmartShield AI",
+  "description": "Your Digital Safety Companion - Real-time protection against scams, fake news, and deepfakes with heuristic and AI-assisted checks.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

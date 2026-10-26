@@ -1,5 +1,6 @@
 {
-  "description": "Analyze suspicious messages, URLs, and news with AI-assisted safety checks that help users spot warning signs and make more informed online decisions.",
+  "title": "SmartShield AI — Your Digital Safety Companion",
+  "description": "Your Digital Safety Companion - Real-time protection against scams, fake news, and deepfakes with heuristic and AI-assisted checks.",
   "robots": {
     "index": false
   },
