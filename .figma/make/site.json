@@ -1,0 +1,10 @@
+{
+  "description": "Analyze suspicious messages, URLs, and news with AI-assisted safety checks that help users spot warning signs and make more informed online decisions.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
