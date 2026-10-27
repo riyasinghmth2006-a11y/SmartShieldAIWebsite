@@ -1,4 +1,3 @@
-
 """Configuration settings for SmartShield AI backend service."""
 
 import os
@@ -23,9 +22,6 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
     "http://localhost:8001",
     "http://127.0.0.1:8001",
-
-    # Production frontend on Vercel
-    "https://smart-shield-ai-website.vercel.app",
 ]
 
 # Validation limits

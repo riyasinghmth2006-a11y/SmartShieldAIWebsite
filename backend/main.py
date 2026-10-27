@@ -1,4 +1,3 @@
-
 """FastAPI application entry point for SmartShield AI."""
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
@@ -36,14 +35,11 @@ app = FastAPI(
     openapi_url=f"{API_PREFIX}/openapi.json",
 )
 
-# CORS configuration
+# Robust CORS configuration allowing development and deployed preview origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=(
-        r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$"
-        r"|^https?://ais-.*\.run\.app$"
-    ),
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$|^https?://ais-.*\.run\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,18 +52,11 @@ deepfake_service = DeepfakeService()
 
 
 @app.exception_handler(ValidationError)
-async def validation_exception_handler(
-    request: Request,
-    exc: ValidationError,
-):
-    """Convert validation errors into HTTP 400 responses."""
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    """Translates custom domain validation errors into standard 400 Bad Request responses."""
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content={
-            "detail": str(exc),
-            "success": False,
-            "error": str(exc),
-        },
+        content={"detail": str(exc), "success": False, "error": str(exc)},
     )
 
 
@@ -78,18 +67,15 @@ async def validation_exception_handler(
 @app.get("/health", response_model=HealthStatus, tags=["Health"])
 @app.get(f"{API_PREFIX}/health", response_model=HealthStatus, tags=["Health"])
 async def health_check():
-    """
-    Lightweight health check.
-    Does not explicitly call model-availability methods.
-    """
+    """Returns system status and model readiness."""
     return HealthStatus(
         status="ok",
         version=__version__,
         models_configured={
             "scam_heuristic": True,
-            "spam_model": False,
-            "fake_news_model": False,
-            "deepfake_model": False,
+            "spam_model": scam_service.is_spam_model_available(),
+            "fake_news_model": fake_news_service.is_model_available(),
+            "deepfake_model": deepfake_service.is_model_available(),
         },
     )
 
@@ -104,16 +90,16 @@ async def health_check():
     tags=["Spam Detection"],
 )
 async def detect_spam(payload: SpamDetectRequest):
-    """Perform spam classification."""
+    """
+    Performs machine-learning spam classification with feature explanation.
+    """
     try:
-        return scam_service.detect_spam(text=payload.text)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except Exception:
-        logger.exception("Unexpected error in spam detection")
+        result = scam_service.detect_spam(text=payload.text)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in spam detection: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process spam detection request.",
@@ -126,19 +112,17 @@ async def detect_spam(payload: SpamDetectRequest):
     tags=["Scam Detection"],
 )
 async def analyze_scam(payload: ScamAnalyzeRequest):
-    """Analyze suspicious messages and URLs."""
+    """
+    Examines message text or suspicious URLs for urgency, sensitive data requests,
+    unusual payment methods, and fraudulent URL characteristics.
+    """
     try:
-        return scam_service.analyze(
-            content=payload.content,
-            mode=payload.mode,
-        )
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except Exception:
-        logger.exception("Unexpected error in scam analysis")
+        result = scam_service.analyze(content=payload.content, mode=payload.mode)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in scam analysis: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process scam analysis request.",
@@ -155,16 +139,16 @@ async def analyze_scam(payload: ScamAnalyzeRequest):
     tags=["Fake News Detection"],
 )
 async def detect_fakenews(payload: FakeNewsDetectRequest):
-    """Evaluate news text using the configured classifier."""
+    """
+    Evaluates news article or claim using DistilBERT model.
+    """
     try:
-        return fake_news_service.detect_fakenews(raw_text=payload.text)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except Exception:
-        logger.exception("Unexpected error in fake news detection")
+        result = fake_news_service.detect_fakenews(raw_text=payload.text)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in fake news detection: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process fake news detection request.",
@@ -177,16 +161,16 @@ async def detect_fakenews(payload: FakeNewsDetectRequest):
     tags=["Fake News Detection"],
 )
 async def analyze_fake_news(payload: FakeNewsAnalyzeRequest):
-    """Analyze news text using the legacy-compatible route."""
+    """
+    Legacy route for news article headline or text evaluation.
+    """
     try:
-        return fake_news_service.analyze(raw_text=payload.text)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except Exception:
-        logger.exception("Unexpected error in fake news analysis")
+        result = fake_news_service.analyze(raw_text=payload.text)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in fake news analysis: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process fake news analysis request.",
@@ -203,22 +187,18 @@ async def analyze_fake_news(payload: FakeNewsAnalyzeRequest):
     tags=["Deepfake Detection"],
 )
 async def detect_deepfake(file: UploadFile = File(...)):
-    """Analyze an uploaded image for potential manipulation."""
+    """
+    Evaluates uploaded image for manipulation signatures using Vision Transformer ONNX model.
+    """
     try:
         content = await file.read()
         filename = file.filename or "uploaded_image.png"
-
-        return deepfake_service.detect_deepfake(
-            filename=filename,
-            content=content,
-        )
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except Exception:
-        logger.exception("Unexpected error in deepfake detection")
+        result = deepfake_service.detect_deepfake(filename=filename, content=content)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in deepfake detection: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process deepfake image detection request.",
@@ -231,22 +211,18 @@ async def detect_deepfake(file: UploadFile = File(...)):
     tags=["Deepfake Detection"],
 )
 async def analyze_deepfake(file: UploadFile = File(...)):
-    """Analyze an image through the legacy-compatible route."""
+    """
+    Legacy route for deepfake image analysis.
+    """
     try:
         content = await file.read()
         filename = file.filename or "uploaded_image.png"
-
-        return deepfake_service.analyze_image(
-            filename=filename,
-            content=content,
-        )
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except Exception:
-        logger.exception("Unexpected error in deepfake analysis")
+        result = deepfake_service.analyze_image(filename=filename, content=content)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in deepfake analysis: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process deepfake image analysis request.",
