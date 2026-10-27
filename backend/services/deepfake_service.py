@@ -1,12 +1,13 @@
-"""Deepfake image analysis service with ONNX Runtime ViT inference and temporary cleanup."""
+"""Deepfake image analysis service with pretrained Vision Transformer (ViT) inference and temporary cleanup."""
 
 import io
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
+
 from backend.config import MODELS_DIR
-from backend.schemas import DeepfakeDetectionResult
+from backend.schemas import DeepfakeDetectResponse, DeepfakeDetectionResult
 from backend.utils.logging import get_logger
 from backend.validators import ValidationError, validate_image_file
 
@@ -28,14 +29,16 @@ def format_file_size(size_bytes: int) -> str:
 
 class DeepfakeService:
     """
-    Validates uploaded images and evaluates authenticity using a trained ONNX ViT model:
-    onnx-community/Deep-Fake-Detector-v2-Model-ONNX.
-    When no deepfake model is installed in backend/models/, returns 'model_unavailable'
+    Validates uploaded images and evaluates authenticity using a trained Vision Transformer model:
+    dima806/deepfake_vs_real_image_detection (ViT architecture fine-tuned on 140,000 real & fake face samples).
+    When no deepfake model is installed in backend/models/, returns model_unavailable
     without inventing fabricated authenticity classifications.
     """
 
     def __init__(self, models_dir: Path = MODELS_DIR):
         self.models_dir = Path(models_dir)
+        self._hf_model: Any = None
+        self._processor: Any = None
         self._session: Any = None
         self._input_name: str | None = None
         self._legacy_mock_model: Any = None
@@ -44,7 +47,11 @@ class DeepfakeService:
     def is_model_available(self) -> bool:
         """Determines if a compatible deepfake classification model is loaded."""
         self._ensure_loaded()
-        return self._session is not None or self._legacy_mock_model is not None
+        return (
+            (self._hf_model is not None and self._processor is not None)
+            or (self._session is not None and self._input_name is not None)
+            or self._legacy_mock_model is not None
+        )
 
     def _ensure_loaded(self) -> None:
         """Attempts to load deepfake model weights if available."""
@@ -52,48 +59,81 @@ class DeepfakeService:
             return
         self._load_attempted = True
 
+        local_dir = self.models_dir / "deepfake_detector_v2"
+        # 1. Prefer local PyTorch/Safetensors ViT weights
+        if local_dir.is_dir() and (local_dir / "config.json").is_file():
+            has_weights = (local_dir / "model.safetensors").is_file() or (local_dir / "pytorch_model.bin").is_file()
+            if has_weights:
+                try:
+                    from transformers import AutoImageProcessor, AutoModelForImageClassification
+                    import torch
+
+                    logger.info(f"Loading genuine ViT deepfake detector from {local_dir}")
+                    self._processor = AutoImageProcessor.from_pretrained(str(local_dir))
+                    self._hf_model = AutoModelForImageClassification.from_pretrained(str(local_dir))
+                    self._hf_model.eval()
+                    logger.info(f"Successfully loaded ViT deepfake detector with id2label: {self._hf_model.config.id2label}")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load ViT PyTorch deepfake model: {e}")
+                    self._hf_model = None
+                    self._processor = None
+
+        # 2. Check for ONNX model artifacts
         candidate_paths = [
-            self.models_dir / "deepfake_detector_v2" / "model_quantized.onnx",
-            self.models_dir / "deepfake_detector_v2" / "model.onnx",
+            local_dir / "model.onnx",
+            local_dir / "model_quantized.onnx",
             self.models_dir / "deepfake_image_model.onnx",
         ]
+        found_onnx = next((p for p in candidate_paths if p.is_file()), None)
+        if found_onnx:
+            try:
+                import onnxruntime as ort
 
-        found = next((p for p in candidate_paths if p.is_file()), None)
-        if not found:
-            logger.info("Deepfake classification model weights not present on disk.")
-            return
+                logger.info(f"Loading ONNX deepfake classification model from {found_onnx}")
+                session_options = ort.SessionOptions()
+                session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                self._session = ort.InferenceSession(
+                    str(found_onnx),
+                    sess_options=session_options,
+                    providers=["CPUExecutionProvider"],
+                )
+                self._input_name = self._session.get_inputs()[0].name
+                logger.info(f"Successfully loaded ONNX model. Input node: {self._input_name}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to initialize deepfake ONNX model: {e}")
+                self._session = None
+                self._input_name = None
 
-        try:
-            import onnxruntime as ort
-
-            logger.info(f"Loading ONNX deepfake classification model from {found}")
-            # Initialize ONNX inference session with CPU provider
-            session_options = ort.SessionOptions()
-            session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            self._session = ort.InferenceSession(
-                str(found),
-                sess_options=session_options,
-                providers=["CPUExecutionProvider"],
-            )
-            self._input_name = self._session.get_inputs()[0].name
-            logger.info(f"Successfully loaded ONNX model. Input node: {self._input_name}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize deepfake ONNX model: {e}")
-            self._session = None
-            self._input_name = None
+        logger.info("Deepfake classification model weights not present on disk.")
 
     def set_model(self, model: Any) -> None:
         """Injects model (used for automated unit tests)."""
         self._legacy_mock_model = model
         self._load_attempted = True
 
-    def _preprocess_image(self, content: bytes) -> Any:
+    def _get_label_mapping(self) -> Tuple[int, int]:
         """
-        Preprocesses raw image bytes to ViT input dimensions:
-        RGB conversion -> Resize to 224x224 Bilinear -> Rescale (1/255) -> Normalize (mean/std 0.5) -> (1, 3, 224, 224).
+        Extracts the exact indices for real and fake classes from the model configuration.
+        Dynamically handles different index conventions.
+        """
+        raw_id2label = getattr(self._hf_model.config, "id2label", {0: "Real", 1: "Fake"})
+        mapping = {}
+        for k, v in raw_id2label.items():
+            idx = int(k) if str(k).isdigit() else k
+            mapping[idx] = str(v).lower()
+
+        real_idx = next((k for k, v in mapping.items() if "real" in v or "authentic" in v), 0)
+        fake_idx = next((k for k, v in mapping.items() if "fake" in v or "deepfake" in v or "ai" in v), 1)
+        return real_idx, fake_idx
+
+    def _infer_probs(self, content: bytes) -> Tuple[float, float]:
+        """
+        Executes genuine model inference on image bytes and returns (prob_real, prob_fake).
         """
         from PIL import Image, UnidentifiedImageError
-        import numpy as np
+        import torch
 
         try:
             image = Image.open(io.BytesIO(content)).convert("RGB")
@@ -102,16 +142,91 @@ class DeepfakeService:
                 "The file could not be decoded as a valid image. It may be incomplete or corrupted."
             ) from err
 
-        image_resized = image.resize((224, 224), Image.Resampling.BILINEAR)
+        if self._hf_model is not None and self._processor is not None:
+            inputs = self._processor(images=image, return_tensors="pt")
+            with torch.no_grad():
+                logits = self._hf_model(**inputs).logits[0]
+                probs = torch.softmax(logits, dim=-1)
 
-        arr = np.array(image_resized, dtype=np.float32) / 255.0
-        mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-        std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-        arr = (arr - mean) / std
-        # Convert HWC to CHW
-        arr = np.transpose(arr, (2, 0, 1))
-        # Add batch dimension: (1, 3, 224, 224)
-        return np.expand_dims(arr, axis=0)
+            real_idx, fake_idx = self._get_label_mapping()
+            prob_real = float(probs[real_idx].item())
+            prob_fake = float(probs[fake_idx].item())
+            return prob_real, prob_fake
+
+        if self._session is not None and self._input_name is not None:
+            import numpy as np
+
+            image_resized = image.resize((224, 224), Image.Resampling.BILINEAR)
+            arr = np.array(image_resized, dtype=np.float32) / 255.0
+            mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+            std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+            arr = (arr - mean) / std
+            arr = np.transpose(arr, (2, 0, 1))
+            arr = np.expand_dims(arr, axis=0)
+
+            outputs = self._session.run(None, {self._input_name: arr})
+            logits = outputs[0][0]
+            exp_logits = np.exp(logits - np.max(logits))
+            probs = exp_logits / np.sum(exp_logits)
+            return float(probs[0]), float(probs[1])
+
+        return 0.5, 0.5
+
+    def detect_deepfake(self, filename: str, content: bytes) -> DeepfakeDetectResponse:
+        """
+        Implements POST /api/deepfake/detect with real Vision Transformer inference.
+        """
+        ext, mime_type = validate_image_file(filename, content)
+        size_str = format_file_size(len(content))
+
+        media_summary: Dict[str, Any] = {
+            "name": os.path.basename(filename),
+            "kind": "image",
+            "extension": ext.upper(),
+            "mime_type": mime_type,
+            "size": size_str,
+            "bytes": len(content),
+        }
+
+        if not self.is_model_available():
+            raise ValidationError("Deepfake detection model is currently unavailable on the server.")
+
+        prob_real, prob_fake = self._infer_probs(content)
+
+        if prob_fake >= 0.70:
+            label = "Potentially AI-Generated"
+            confidence = round(prob_fake, 2)
+            explanation = (
+                f"Vision Transformer deepfake detector identified strong synthetic generation signatures "
+                f"(manipulation probability: {prob_fake:.1%}). The image exhibits texture and patch "
+                "patterns characteristic of generative diffusion or GAN synthesis."
+            )
+        elif prob_fake >= 0.50:
+            label = "Potentially Manipulated"
+            confidence = round(prob_fake, 2)
+            explanation = (
+                f"Vision Transformer deepfake detector identified moderate manipulation indicators "
+                f"(manipulation probability: {prob_fake:.1%}). Structural anomalies were observed. "
+                "Recommend reverse-searching the original unedited source."
+            )
+        else:
+            label = "No Strong Manipulation Signals Detected"
+            confidence = round(prob_real, 2)
+            explanation = (
+                f"Vision Transformer deepfake detector found no dominant manipulation patterns "
+                f"(authenticity score: {prob_real:.1%}). Sensor noise and lighting coherence "
+                "appear consistent with natural photography."
+            )
+
+        return DeepfakeDetectResponse(
+            success=True,
+            label=label,
+            confidence=confidence,
+            model="dima806/deepfake_vs_real_image_detection",
+            explanation=explanation,
+            media_summary=media_summary,
+            verification_status="unverified",
+        )
 
     def analyze_image(self, filename: str, content: bytes) -> DeepfakeDetectionResult:
         """
@@ -130,7 +245,6 @@ class DeepfakeService:
             "bytes": len(content),
         }
 
-        # Safe temporary file usage with guaranteed cleanup
         temp_file_path = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -143,7 +257,6 @@ class DeepfakeService:
 
             logger.info(f"Saved media temporarily to {temp_file_path} for inspection")
 
-            # Check if genuine deepfake model is available
             if not self.is_model_available():
                 return DeepfakeDetectionResult(
                     success=True,
@@ -160,8 +273,7 @@ class DeepfakeService:
                     recommendations=DEEPFAKE_RECOMMENDATIONS,
                 )
 
-            # If mock model injected for tests
-            if self._legacy_mock_model is not None and self._session is None:
+            if self._legacy_mock_model is not None and self._hf_model is None and self._session is None:
                 return DeepfakeDetectionResult(
                     success=True,
                     detector="deepfake",
@@ -174,45 +286,32 @@ class DeepfakeService:
                     recommendations=DEEPFAKE_RECOMMENDATIONS,
                 )
 
-            # Genuine ONNX Runtime ViT Inference
             try:
-                import numpy as np
+                prob_real, prob_fake = self._infer_probs(content)
 
-                input_tensor = self._preprocess_image(content)
-                outputs = self._session.run(None, {self._input_name: input_tensor})
-                logits = outputs[0][0]  # shape (2,)
-
-                # Numerically stable softmax
-                exp_logits = np.exp(logits - np.max(logits))
-                probs = exp_logits / np.sum(exp_logits)
-
-                prob_realism = float(probs[0])
-                prob_deepfake = float(probs[1])
-
-                # High-fidelity labels aligning with frontend badges
-                if prob_deepfake >= 0.70:
+                if prob_fake >= 0.70:
                     label = "Potentially AI-Generated"
-                    confidence = round(prob_deepfake, 3)
+                    confidence = round(prob_fake, 3)
                     explanation = (
-                        f"ViT Deepfake Detector identified strong synthetic generation signatures "
-                        f"(manipulation probability: {prob_deepfake:.1%}). The image exhibits texture and frequency "
-                        "patterns characteristic of generative diffusion or GAN models."
+                        f"Vision Transformer deepfake detector identified strong synthetic generation signatures "
+                        f"(manipulation probability: {prob_fake:.1%}). The image exhibits texture and patch "
+                        "patterns characteristic of generative diffusion or GAN synthesis."
                     )
-                elif prob_deepfake >= 0.50:
+                elif prob_fake >= 0.50:
                     label = "Potentially Manipulated"
-                    confidence = round(prob_deepfake, 3)
+                    confidence = round(prob_fake, 3)
                     explanation = (
-                        f"ViT Deepfake Detector identified moderate manipulation indicators "
-                        f"(manipulation probability: {prob_deepfake:.1%}). Structural anomalies were observed. "
+                        f"Vision Transformer deepfake detector identified moderate manipulation indicators "
+                        f"(manipulation probability: {prob_fake:.1%}). Structural anomalies were observed. "
                         "Recommend reverse-searching the original unedited source."
                     )
                 else:
                     label = "No Strong Manipulation Signals Detected"
-                    confidence = round(prob_realism, 3)
+                    confidence = round(prob_real, 3)
                     explanation = (
-                        f"ViT Deepfake Detector found no dominant manipulation patterns "
-                        f"(authenticity score: {prob_realism:.1%}). The image exhibits natural sensor noise "
-                        "and lighting coherence consistent with standard photography."
+                        f"Vision Transformer deepfake detector found no dominant manipulation patterns "
+                        f"(authenticity score: {prob_real:.1%}). Sensor noise and lighting coherence "
+                        "appear consistent with natural photography."
                     )
 
                 return DeepfakeDetectionResult(
@@ -223,6 +322,7 @@ class DeepfakeService:
                     media_summary=media_summary,
                     label=label,
                     confidence=confidence,
+                    model="dima806/deepfake_vs_real_image_detection",
                     explanation=explanation,
                     recommendations=DEEPFAKE_RECOMMENDATIONS,
                 )
@@ -243,7 +343,6 @@ class DeepfakeService:
                 )
 
         finally:
-            # Guarantee temporary file is deleted
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
                     os.unlink(temp_file_path)

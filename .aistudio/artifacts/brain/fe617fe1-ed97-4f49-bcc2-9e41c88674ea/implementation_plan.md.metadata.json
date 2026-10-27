@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for debugging and fixing prediction accuracy in Fake News Detection and Deepfake Detection features. Covers multi-stage claim verification using Wikipedia and web retrieval, face localization with OpenCV for facial ViT deepfake inference, inconclusive state handling for non-facial images, and held-out validation suites.",
+  "updatedAt":  "2026-10-27T15:37:49.975855530Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

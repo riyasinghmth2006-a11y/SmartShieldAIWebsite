@@ -2,6 +2,7 @@
 
 import os
 from typing import Tuple
+
 from backend.config import (
     ALLOWED_IMAGE_EXTENSIONS,
     MAX_IMAGE_SIZE_BYTES,
@@ -23,7 +24,6 @@ def validate_scam_input(content: str, mode: str) -> str:
         raise ValidationError("Input content must be a string.")
 
     cleaned = content.strip()
-
     if len(cleaned) < MIN_SCAM_TEXT_LENGTH:
         raise ValidationError(
             f"Input is too short. Please provide at least {MIN_SCAM_TEXT_LENGTH} characters."
@@ -43,7 +43,6 @@ def validate_news_input(text: str) -> str:
         raise ValidationError("News text must be a string.")
 
     cleaned = text.strip()
-
     if len(cleaned) < MIN_NEWS_TEXT_LENGTH:
         raise ValidationError(
             f"Please enter at least a full sentence ({MIN_NEWS_TEXT_LENGTH}+ characters) to analyze."
@@ -73,8 +72,9 @@ def validate_image_file(filename: str, content: bytes) -> Tuple[str, str]:
 
     ext = parts[1].lower()
     if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        allowed_str = ", ".join(sorted(ALLOWED_IMAGE_EXTENSIONS))
         raise ValidationError(
-            f"Invalid file type .{ext}. Allowed image types are: {', '.join(sorted(ALLOWED_IMAGE_EXTENSIONS))}."
+            f"Invalid file type .{ext}. Allowed image types are: {allowed_str}."
         )
 
     file_size = len(content)

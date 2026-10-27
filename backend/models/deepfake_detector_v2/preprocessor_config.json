@@ -1,5 +1,4 @@
 {
-  "do_convert_rgb": null,
   "do_normalize": true,
   "do_rescale": true,
   "do_resize": true,
@@ -8,7 +7,7 @@
     0.5,
     0.5
   ],
-  "image_processor_type": "ViTFeatureExtractor",
+  "image_processor_type": "ViTImageProcessor",
   "image_std": [
     0.5,
     0.5,

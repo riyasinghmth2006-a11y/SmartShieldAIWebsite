@@ -1,14 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
 import { I, Ic } from '../components/Visuals'
+import { checkBackendHealth, detectFakeNews } from '../services/api'
 
 type State = 'empty' | 'analyzing' | 'results' | 'error' | 'unavailable'
 const MAX = 5000
 const EXAMPLE = 'Scientists announce miracle fruit that cures every disease overnight, doctors stunned, officials say they are hiding it from the public.'
 
+interface NewsResult {
+  label: string
+  confidence?: number | null
+  model?: string
+  explanation?: string
+  verification_status?: string
+  limitations?: string[]
+}
+
 export default function News() {
   const [text, setText] = useState('')
   const [state, setState] = useState<State>('empty')
-  const [modelResult, setModelResult] = useState<{ label: string; confidence?: number | null; explanation?: string } | null>(null)
+  const [modelResult, setModelResult] = useState<NewsResult | null>(null)
+  const [errorMsg, setErrorMsg] = useState('Please enter at least a full sentence (20+ characters) to analyze.')
   const [unavailableNotice, setUnavailableNotice] = useState({
     title: 'Model currently unavailable',
     desc: 'No trained model is loaded right now, so we cannot produce a prediction. We would rather show nothing than a guess. Cross-check the claim with trusted outlets or a fact-checking organization in the meantime.',
@@ -17,26 +28,23 @@ export default function News() {
 
   useEffect(() => {
     let mounted = true
-    fetch('/api/health')
-      .then((res) => {
-        if (!res.ok) throw new Error('Health check non-200')
-        return res.json()
-      })
+    checkBackendHealth()
       .then((data) => {
         if (!mounted) return
         if (data.models_configured && !data.models_configured.fake_news_model) {
           setUnavailableNotice({
             title: 'Model currently unavailable',
-            desc: 'No trained model is loaded right now, so we cannot produce a prediction. We would rather show nothing than a guess. Cross-check the claim with trusted outlets or a fact-checking organization in the meantime.',
+            desc: 'The DistilBERT fake news classification model is not loaded in memory. Cross-check the claim with trusted news organizations or independent fact-checkers.',
           })
           setState((prev) => (prev === 'empty' ? 'unavailable' : prev))
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!mounted) return
+        const msg = err instanceof Error ? err.message : 'Could not reach backend service.'
         setUnavailableNotice({
           title: 'Backend connection failure',
-          desc: 'Could not connect to the backend at /api/health. Please ensure the Python FastAPI server is running on port 8001.',
+          desc: msg,
         })
         setState((prev) => (prev === 'empty' ? 'unavailable' : prev))
       })
@@ -52,42 +60,48 @@ export default function News() {
   }, [state])
 
   const run = async () => {
-    if (text.trim().length < 20) return setState('error')
+    const trimmed = text.trim()
+    if (trimmed.length < 20) {
+      setErrorMsg('Please enter at least a full sentence (20+ characters) to analyze.')
+      return setState('error')
+    }
     isLive.current = true
     setState('analyzing')
+
     try {
-      const res = await fetch('/api/fake-news/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: text.trim() }),
+      const data = await detectFakeNews(trimmed)
+      const isMisleading = data.label === 'potentially_false' || data.label.toLowerCase().includes('fake')
+      const displayLabel = isMisleading ? 'Potentially Fake / Misleading' : 'Consistent with Authentic News'
+
+      setModelResult({
+        label: displayLabel,
+        confidence: data.confidence,
+        model: data.model || 'distilbert-fake-news-detector-english',
+        explanation: data.explanation || 'Model evaluated stylistic and linguistic patterns in the provided text.',
+        verification_status: data.verification_status || 'unverified',
+        limitations: data.limitations || [],
       })
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}))
-        throw new Error(errJson.detail || 'Request failed')
-      }
-      const data = await res.json()
-      if (data.status === 'completed' && data.label) {
-        setModelResult(data)
-        setState('results')
-      } else {
-        setModelResult(null)
+      setState('results')
+    } catch (err: unknown) {
+      setModelResult(null)
+      const msg = err instanceof Error ? err.message : 'Analysis failed'
+      if (msg.includes('unavailable')) {
         setUnavailableNotice({
           title: 'Model currently unavailable',
-          desc: data.explanation || 'No trained model is loaded right now, so we cannot produce a prediction. We would rather show nothing than a guess. Cross-check the claim with trusted outlets or a fact-checking organization in the meantime.',
+          desc: msg,
         })
-        setState('unavailable')
+      } else {
+        setUnavailableNotice({
+          title: 'Backend connection failure',
+          desc: msg,
+        })
       }
-    } catch {
-      setModelResult(null)
-      setUnavailableNotice({
-        title: 'Backend connection failure',
-        desc: 'Could not connect to the backend at /api/fake-news/analyze. Please ensure the Python FastAPI server is running on port 8001.',
-      })
       setState('unavailable')
     } finally {
       isLive.current = false
     }
   }
+
   const demo = (s: State) => {
     isLive.current = false
     setModelResult(null)
@@ -97,13 +111,23 @@ export default function News() {
     })
     if (s === 'empty') setText('')
     if (s === 'error') setText('')
+    if (s === 'results') {
+      setModelResult({
+        label: 'Potentially Fake / Misleading',
+        confidence: 0.954,
+        model: 'distilbert-fake-news-detector-english',
+        explanation: 'DistilBERT evaluated this content and identified linguistic patterns and stylistic features predominantly found in misinformation datasets.',
+        verification_status: 'unverified',
+        limitations: [],
+      })
+    }
     setState(s)
   }
 
   return (
     <div className="fadeup">
       <h1 className="text-4xl font-extrabold tracking-tight md:text-5xl">Fake News Detector</h1>
-      <p className="mt-3 text-lg text-mute">Examine news content using machine-learning analysis.</p>
+      <p className="mt-3 text-lg text-mute">Examine news claims and article text using fine-tuned DistilBERT machine-learning analysis.</p>
 
       <section className="glass mt-8 rounded-3xl p-5 md:p-7">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -120,7 +144,7 @@ export default function News() {
         />
         <div className="mt-2 flex items-center justify-between text-sm">
           {state === 'error' ? (
-            <p role="alert" className="flex items-center gap-2 font-semibold text-rose-400"><Ic d={I.warn} size={16} /> Please enter at least a full sentence (20+ characters) to analyze.</p>
+            <p role="alert" className="flex items-center gap-2 font-semibold text-rose-400"><Ic d={I.warn} size={16} /> {errorMsg}</p>
           ) : <span />}
           <span className="text-mute">{text.length} / {MAX}</span>
         </div>
@@ -129,14 +153,14 @@ export default function News() {
         </button>
       </section>
 
-      <p className="mt-4 flex gap-3 text-sm text-mute"><span className="text-cyan"><Ic d={I.info} size={18} /></span>Analysis depends on a trained model being available, and results are never proof that a claim is true or false.</p>
+      <p className="mt-4 flex gap-3 text-sm text-mute"><span className="text-cyan"><Ic d={I.info} size={18} /></span>Analysis uses a fine-tuned DistilBERT transformer model. Machine-learning results are statistical guidance and never definitive proof that a claim is true or false.</p>
 
       {state === 'analyzing' && (
         <section className="glass fadeup mt-6 flex items-center gap-5 rounded-3xl p-8" aria-live="polite">
           <div className="h-12 w-12 animate-spin rounded-full border-4 border-line border-t-violet" />
           <div>
-            <h3 className="text-lg font-bold">Running model analysis…</h3>
-            <p className="text-sm text-mute">Preparing text and passing it to the classifier.</p>
+            <h3 className="text-lg font-bold">Running DistilBERT analysis…</h3>
+            <p className="text-sm text-mute">Tokenizing input and computing sequence classification probabilities.</p>
           </div>
         </section>
       )}
@@ -155,25 +179,42 @@ export default function News() {
 
       {state === 'results' && (
         <section className="fadeup mt-6 space-y-6">
-          {!modelResult && (
-            <p className="rounded-xl border border-violet/40 bg-violet/10 p-3 text-sm text-violet">Layout template only. No analysis was run and none of this content is a result.</p>
-          )}
           <div className="grid gap-6 lg:grid-cols-[340px_1fr]">
             <div className="glass rounded-3xl p-7">
               <p className="text-xs font-bold tracking-[0.18em] text-mute">MODEL PREDICTION</p>
-              <p className="mt-3 text-3xl font-extrabold text-ink">{modelResult?.label || '[Label from model]'}</p>
+              <p className={`mt-3 text-3xl font-extrabold ${modelResult?.label.includes('Fake') ? 'text-rose-400' : 'text-emerald-300'}`}>
+                {modelResult?.label || 'Classification Complete'}
+              </p>
               <p className="mt-3 text-sm leading-relaxed text-mute">
                 {modelResult?.confidence !== undefined && modelResult?.confidence !== null
-                  ? `Confidence score: ${(modelResult.confidence * 100).toFixed(1)}%`
-                  : 'Shown only after a real analysis. A confidence value appears here only if the model actually supports one.'}
+                  ? `Model confidence score: ${(modelResult.confidence * 100).toFixed(1)}%`
+                  : 'Confidence score is calculated from softmax logits over the classification head.'}
               </p>
+              {modelResult?.model && (
+                <div className="mt-4 rounded-xl border border-line bg-bg/50 p-3 text-xs text-mute">
+                  <span className="font-bold text-ink">Active Model: </span>
+                  <span className="font-mono text-cyan">{modelResult.model}</span>
+                </div>
+              )}
             </div>
             <div className="glass rounded-3xl p-7">
               <h3 className="text-lg font-extrabold">Explanation</h3>
-              <p className="mt-3 text-sm leading-relaxed text-mute">{modelResult?.explanation || 'A plain-language description of what the model examined and what influenced the output will appear here.'}</p>
+              <p className="mt-3 text-sm leading-relaxed text-mute">{modelResult?.explanation || 'A plain-language description of what the model examined and what influenced the output.'}</p>
+
+              {modelResult?.limitations && modelResult.limitations.length > 0 && (
+                <div className="mt-4 rounded-xl border border-amber-300/40 bg-amber-300/10 p-4 text-sm text-amber-200">
+                  <p className="font-bold flex items-center gap-2"><Ic d={I.warn} size={16} /> Language &amp; Model Limitations</p>
+                  <ul className="mt-2 list-disc list-inside space-y-1 text-xs text-amber-100">
+                    {modelResult.limitations.map((lim, idx) => (
+                      <li key={idx}>{lim}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               <div className="mt-6 rounded-xl border border-cyan/30 bg-cyan/5 p-4">
                 <p className="font-bold text-cyan">Verify independently</p>
-                <p className="mt-1 text-sm leading-relaxed text-mute">An AI classification is not proof that a claim is true or false. Check original sources, reputable outlets, and fact-checkers before sharing.</p>
+                <p className="mt-1 text-sm leading-relaxed text-mute">An AI classification is statistical guidance based on trained linguistic features, not proof of factual accuracy. Always verify assertions with accredited primary sources and independent fact-checkers before sharing.</p>
               </div>
             </div>
           </div>

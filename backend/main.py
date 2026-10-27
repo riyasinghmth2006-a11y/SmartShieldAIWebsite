@@ -7,12 +7,17 @@ from fastapi.responses import JSONResponse
 from backend import __version__
 from backend.config import ALLOWED_ORIGINS, API_PREFIX
 from backend.schemas import (
+    DeepfakeDetectResponse,
     DeepfakeDetectionResult,
     FakeNewsAnalyzeRequest,
+    FakeNewsDetectRequest,
+    FakeNewsDetectResponse,
     FakeNewsDetectionResult,
     HealthStatus,
     ScamAnalyzeRequest,
     ScamDetectionResult,
+    SpamDetectRequest,
+    SpamDetectResponse,
 )
 from backend.services.deepfake_service import DeepfakeService
 from backend.services.fake_news_service import FakeNewsService
@@ -30,10 +35,11 @@ app = FastAPI(
     openapi_url=f"{API_PREFIX}/openapi.json",
 )
 
-# CORS configuration
+# Robust CORS configuration allowing development and deployed preview origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$|^https?://ais-.*\.run\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,7 +61,7 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
 
 
 # ==========================================
-# Health Endpoint
+# Health Endpoints
 # ==========================================
 
 @app.get("/health", response_model=HealthStatus, tags=["Health"])
@@ -67,6 +73,7 @@ async def health_check():
         version=__version__,
         models_configured={
             "scam_heuristic": True,
+            "spam_model": scam_service.is_spam_model_available(),
             "fake_news_model": fake_news_service.is_model_available(),
             "deepfake_model": deepfake_service.is_model_available(),
         },
@@ -74,8 +81,30 @@ async def health_check():
 
 
 # ==========================================
-# Scam Detection Route
+# Spam & Scam Detection Routes
 # ==========================================
+
+@app.post(
+    f"{API_PREFIX}/spam/detect",
+    response_model=SpamDetectResponse,
+    tags=["Spam Detection"],
+)
+async def detect_spam(payload: SpamDetectRequest):
+    """
+    Performs machine-learning spam classification with feature explanation.
+    """
+    try:
+        result = scam_service.detect_spam(text=payload.text)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in spam detection: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process spam detection request.",
+        )
+
 
 @app.post(
     f"{API_PREFIX}/scam/analyze",
@@ -101,8 +130,30 @@ async def analyze_scam(payload: ScamAnalyzeRequest):
 
 
 # ==========================================
-# Fake News Detection Route
+# Fake News Detection Routes
 # ==========================================
+
+@app.post(
+    f"{API_PREFIX}/fakenews/detect",
+    response_model=FakeNewsDetectResponse,
+    tags=["Fake News Detection"],
+)
+async def detect_fakenews(payload: FakeNewsDetectRequest):
+    """
+    Evaluates news article or claim using DistilBERT model.
+    """
+    try:
+        result = fake_news_service.detect_fakenews(raw_text=payload.text)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in fake news detection: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process fake news detection request.",
+        )
+
 
 @app.post(
     f"{API_PREFIX}/fake-news/analyze",
@@ -111,8 +162,7 @@ async def analyze_scam(payload: ScamAnalyzeRequest):
 )
 async def analyze_fake_news(payload: FakeNewsAnalyzeRequest):
     """
-    Evaluates news article headline or text with a trained ML model if installed.
-    Returns 'model_unavailable' status when weights are absent.
+    Legacy route for news article headline or text evaluation.
     """
     try:
         result = fake_news_service.analyze(raw_text=payload.text)
@@ -128,8 +178,32 @@ async def analyze_fake_news(payload: FakeNewsAnalyzeRequest):
 
 
 # ==========================================
-# Deepfake Detection Route
+# Deepfake Detection Routes
 # ==========================================
+
+@app.post(
+    f"{API_PREFIX}/deepfake/detect",
+    response_model=DeepfakeDetectResponse,
+    tags=["Deepfake Detection"],
+)
+async def detect_deepfake(file: UploadFile = File(...)):
+    """
+    Evaluates uploaded image for manipulation signatures using Vision Transformer ONNX model.
+    """
+    try:
+        content = await file.read()
+        filename = file.filename or "uploaded_image.png"
+        result = deepfake_service.detect_deepfake(filename=filename, content=content)
+        return result
+    except ValidationError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as exc:
+        logger.error(f"Unexpected error in deepfake detection: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process deepfake image detection request.",
+        )
+
 
 @app.post(
     f"{API_PREFIX}/deepfake/analyze",
@@ -138,8 +212,7 @@ async def analyze_fake_news(payload: FakeNewsAnalyzeRequest):
 )
 async def analyze_deepfake(file: UploadFile = File(...)):
     """
-    Validates uploaded image file bytes and checks for potential manipulation.
-    Returns 'model_unavailable' status when no deepfake model is configured.
+    Legacy route for deepfake image analysis.
     """
     try:
         content = await file.read()

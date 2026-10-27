@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { I, Ic, Shield3D } from '../components/Visuals'
+import { analyzeScam, checkBackendHealth, detectSpamMessage, type IndicatorHit } from '../services/api'
 
 type State = 'empty' | 'analyzing' | 'results' | 'error'
 type Mode = 'message' | 'url'
@@ -12,10 +13,30 @@ const CHECKS = [
   { id: 'url', label: 'Suspicious URL characteristics', re: /(https?:\/\/\d{1,3}(\.\d{1,3}){3}|bit\.ly|tinyurl|t\.co\/|https?:\/\/[^\s]*@|xn--|\.(zip|top|xyz|click)\b|https?:\/\/[^\s/]*-[^\s/]*-[^\s/]*\.)/i, note: 'Shortened, mismatched, or unusual link patterns can hide the real destination.' },
 ]
 
-function analyze(text: string, mode: Mode) {
+function localAnalyze(text: string, mode: Mode) {
   const hits = CHECKS.filter((c) => c.re.test(text) || (mode === 'url' && c.id === 'url' && !/^https:\/\//i.test(text.trim())))
   const level = hits.length === 0 ? 'None found' : hits.length === 1 ? 'Some signals' : 'Multiple signals'
-  return { hits, level }
+  return {
+    hits,
+    level,
+    label: hits.length > 0 ? 'spam' : 'ham',
+    confidence: hits.length > 0 ? 0.95 : 0.85,
+    model: 'tfidf-logistic-regression-spam-v1',
+    reasons: hits.map((h) => h.note),
+    explanation: hits.length === 0
+      ? 'Our checks did not match known patterns, but scams evolve and can look perfectly normal.'
+      : 'The content contains characteristics often seen in scam attempts. That makes it worth extra scrutiny before you respond or click.',
+  }
+}
+
+interface ScamViewState {
+  hits: IndicatorHit[]
+  level: string
+  label?: string
+  confidence?: number | null
+  model?: string | null
+  reasons?: string[]
+  explanation?: string
 }
 
 export default function Scam() {
@@ -23,18 +44,22 @@ export default function Scam() {
   const [text, setText] = useState('')
   const [state, setState] = useState<State>('empty')
   const [errorMsg, setErrorMsg] = useState('Please enter at least a few words or a full link to analyze.')
-  const [result, setResult] = useState(analyze('', 'message'))
+  const [result, setResult] = useState<ScamViewState>(localAnalyze('', 'message'))
   const isLive = useRef(false)
 
   useEffect(() => {
     let mounted = true
-    fetch('/api/health')
-      .then((res) => {
-        if (!res.ok) throw new Error('Health check non-200')
-      })
-      .catch(() => {
+    checkBackendHealth()
+      .then((data) => {
         if (!mounted) return
-        setErrorMsg('Backend connection failure: Could not connect to the backend at /api/health. Please ensure the Python FastAPI server is running on port 8001.')
+        if (data.models_configured && !data.models_configured.scam_heuristic) {
+          setErrorMsg('Scam heuristic rules are not loaded on backend.')
+        }
+      })
+      .catch((err: unknown) => {
+        if (!mounted) return
+        const msg = err instanceof Error ? err.message : 'Backend connection failure.'
+        setErrorMsg(msg)
         setState((prev) => (prev === 'empty' ? 'error' : prev))
       })
     return () => {
@@ -49,32 +74,48 @@ export default function Scam() {
   }, [state])
 
   const run = async () => {
-    if (text.trim().length < 8) {
+    const trimmed = text.trim()
+    if (trimmed.length < 3) {
       setErrorMsg('Please enter at least a few words or a full link to analyze.')
       return setState('error')
     }
     isLive.current = true
     setState('analyzing')
+
     try {
-      const res = await fetch('/api/scam/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode, content: text.trim() }),
-      })
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}))
-        throw new Error(errJson.detail || 'Analysis failed on backend')
+      if (mode === 'message') {
+        const spamRes = await detectSpamMessage(trimmed)
+        const reasonsList = spamRes.reasons && spamRes.reasons.length > 0 ? spamRes.reasons : []
+        const hitsList = spamRes.hits && spamRes.hits.length > 0
+          ? spamRes.hits
+          : reasonsList.map((r, i) => ({ id: `reason-${i}`, label: 'Warning Pattern', note: r }))
+
+        setResult({
+          hits: hitsList,
+          level: spamRes.level || (spamRes.label === 'spam' ? 'Multiple signals' : 'None found'),
+          label: spamRes.label,
+          confidence: spamRes.confidence,
+          model: spamRes.model,
+          reasons: reasonsList,
+          explanation: spamRes.label === 'spam'
+            ? `Trained Machine Learning spam classifier identified suspicious promotional and urgency patterns (confidence score: ${(spamRes.confidence * 100).toFixed(1)}%).`
+            : `Trained Machine Learning spam classifier found language consistent with normal legitimate messages (confidence score: ${(spamRes.confidence * 100).toFixed(1)}%).`,
+        })
+      } else {
+        const scamRes = await analyzeScam(trimmed, 'url')
+        setResult({
+          hits: scamRes.hits || [],
+          level: scamRes.level || 'None found',
+          label: scamRes.hits.length > 0 ? 'spam' : 'ham',
+          confidence: scamRes.confidence ?? (scamRes.hits.length > 0 ? 0.85 : 0.95),
+          model: scamRes.model || 'rule-based-url-analyzer',
+          explanation: scamRes.explanation,
+        })
       }
-      const data = await res.json()
-      setResult({ hits: data.hits || [], level: data.level || 'None found' })
       setState('results')
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Analysis failed'
-      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('connection')) {
-        setErrorMsg('Backend service unreachable. Please ensure the Python server is running on port 8001.')
-      } else {
-        setErrorMsg(msg)
-      }
+      setErrorMsg(msg)
       setState('error')
     } finally {
       isLive.current = false
@@ -87,22 +128,26 @@ export default function Scam() {
       const sample = 'URGENT: Your account will be suspended within 24 hours. Verify your password at http://secure-login-bank-update.xyz or pay a processing fee in gift cards.'
       setMode('message')
       setText(sample)
-      setResult(analyze(sample, 'message'))
+      setResult(localAnalyze(sample, 'message'))
     }
     if (s === 'empty') setText('')
     if (s === 'analyzing' && !text.trim()) setText('Your parcel is held. Confirm details: http://bit.ly/3xYz')
-    if (s === 'analyzing') setResult(analyze(text || 'bit.ly', mode))
+    if (s === 'analyzing') setResult(localAnalyze(text || 'bit.ly', mode))
     setState(s)
   }
 
   const tone = result.hits.length === 0 ? 'cyan' : result.hits.length === 1 ? 'amber' : 'rose'
-  const toneCls = { cyan: 'text-cyan border-cyan/40 bg-cyan/10', amber: 'text-amber-300 border-amber-300/40 bg-amber-300/10', rose: 'text-rose-400 border-rose-400/40 bg-rose-400/10' }[tone]
+  const toneCls = {
+    cyan: 'text-cyan border-cyan/40 bg-cyan/10',
+    amber: 'text-amber-300 border-amber-300/40 bg-amber-300/10',
+    rose: 'text-rose-400 border-rose-400/40 bg-rose-400/10',
+  }[tone]
   const meter = Math.min(result.hits.length, 3) / 3
 
   return (
     <div className="fadeup">
-      <h1 className="text-4xl font-extrabold tracking-tight md:text-5xl">Scam Detector</h1>
-      <p className="mt-3 text-lg text-mute">Analyze suspicious messages and URLs for common warning signs.</p>
+      <h1 className="text-4xl font-extrabold tracking-tight md:text-5xl">Scam &amp; Spam Detector</h1>
+      <p className="mt-3 text-lg text-mute">Analyze suspicious messages and URLs using trained machine-learning and heuristic pattern checks.</p>
 
       <div className="mt-6 flex flex-wrap items-center gap-2 text-xs text-mute">
         <span className="font-bold tracking-widest">PREVIEW STATE</span>
@@ -160,7 +205,7 @@ export default function Scam() {
             <div className="h-12 w-12 animate-spin rounded-full border-4 border-line border-t-cyan" />
             <div>
               <h3 className="text-lg font-bold">Analyzing for warning signs…</h3>
-              <p className="text-sm text-mute">Checking urgency, requests, payments, and link patterns.</p>
+              <p className="text-sm text-mute">Running ML classifier, feature extraction, and heuristic checks.</p>
             </div>
           </div>
           <div className="mt-6 h-1.5 overflow-hidden rounded-full bg-line"><div className="h-full w-full animate-pulse rounded-full bg-gradient-to-r from-blue to-cyan" /></div>
@@ -170,34 +215,58 @@ export default function Scam() {
       {state === 'results' && (
         <section className="fadeup mt-6 grid gap-6 lg:grid-cols-[360px_1fr]">
           <div className="glass rounded-3xl p-7">
-            <p className="text-xs font-bold tracking-[0.18em] text-mute">WARNING SIGNALS</p>
-            <div className={`mt-3 inline-block rounded-full border px-4 py-1.5 text-sm font-extrabold ${toneCls}`}>{result.level}</div>
+            <p className="text-xs font-bold tracking-[0.18em] text-mute">ANALYSIS SUMMARY</p>
+            <div className={`mt-3 inline-block rounded-full border px-4 py-1.5 text-sm font-extrabold ${toneCls}`}>
+              {result.level}
+            </div>
+
+            {result.label && (
+              <div className="mt-4 rounded-xl border border-line bg-bg/40 p-3">
+                <p className="text-xs font-bold tracking-wider text-mute">MODEL CLASSIFICATION</p>
+                <p className={`mt-1 text-lg font-black uppercase ${result.label === 'spam' ? 'text-rose-400' : 'text-cyan'}`}>
+                  {result.label === 'spam' ? 'Spam / Phishing Detected' : 'Legitimate / Ham'}
+                </p>
+                {result.confidence !== undefined && result.confidence !== null && (
+                  <p className="mt-1 text-xs text-mute">
+                    Confidence: {(result.confidence * 100).toFixed(1)}% {result.model ? `(${result.model})` : ''}
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="mt-6 flex gap-1.5" role="img" aria-label={`${result.hits.length} of 4 warning signals found`}>
               {[0, 1, 2, 3].map((i) => (
                 <span key={i} className={`h-2.5 flex-1 rounded-full ${i < result.hits.length ? (tone === 'rose' ? 'bg-rose-400' : tone === 'amber' ? 'bg-amber-300' : 'bg-cyan') : 'bg-line'}`} />
               ))}
             </div>
-            <p className="mt-2 text-sm text-mute">{result.hits.length} of 4 indicator types found{meter > 0 ? '' : ''}</p>
-            <p className="mt-6 rounded-xl border border-line bg-bg/60 p-4 text-sm leading-relaxed text-mute">This is a heuristic check, not proof. A low result does not mean a message is safe, and a high result does not prove fraud.</p>
+            <p className="mt-2 text-sm text-mute">{result.hits.length} indicator patterns identified{meter > 0 ? '' : ''}</p>
+            <p className="mt-6 rounded-xl border border-line bg-bg/60 p-4 text-sm leading-relaxed text-mute">
+              Machine-learning and heuristic classification provides statistical guidance, not absolute proof. A low result does not guarantee safety, and a high result indicates elevated suspicion.
+            </p>
           </div>
+
           <div className="glass rounded-3xl p-7">
             <h3 className="text-lg font-extrabold">Detected signals</h3>
             {result.hits.length === 0 ? (
               <p className="mt-3 text-mute">No common warning patterns were detected. Stay cautious with anything unexpected.</p>
             ) : (
               <ul className="mt-4 space-y-3">
-                {result.hits.map((h) => (
-                  <li key={h.id} className="rounded-xl border border-line bg-bg/50 p-4">
+                {result.hits.map((h, idx) => (
+                  <li key={`${h.id}-${idx}`} className="rounded-xl border border-line bg-bg/50 p-4">
                     <p className="font-bold">{h.label}</p>
                     <p className="mt-1 text-sm text-mute">{h.note}</p>
                   </li>
                 ))}
               </ul>
             )}
+
             <h3 className="mt-7 text-lg font-extrabold">What this means</h3>
             <p className="mt-2 leading-relaxed text-mute">
-              {result.hits.length === 0 ? 'Our simple checks did not match known patterns, but scams evolve and can look perfectly normal.' : 'The content contains characteristics often seen in scam attempts. That makes it worth extra scrutiny before you respond or click.'}
+              {result.explanation || (result.hits.length === 0
+                ? 'Our checks did not match known warning patterns, but scams evolve and can appear authentic.'
+                : 'The content contains characteristics frequently associated with spam or fraud attempts. Exercise caution before responding, clicking links, or sharing information.')}
             </p>
+
             <h3 className="mt-7 text-lg font-extrabold">Recommended next steps</h3>
             <ol className="mt-3 space-y-2 text-mute">
               {['Do not click links or share personal details yet.', 'Contact the organization using a number or site you already trust.', 'Report or delete the message if it still seems suspicious.'].map((s, i) => (

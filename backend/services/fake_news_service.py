@@ -4,10 +4,11 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Tuple
+
 from backend.config import MODELS_DIR
-from backend.schemas import FakeNewsDetectionResult
+from backend.schemas import FakeNewsDetectResponse, FakeNewsDetectionResult
 from backend.utils.logging import get_logger
-from backend.validators import validate_news_input
+from backend.validators import ValidationError, validate_news_input
 
 logger = get_logger("smartshield.fake_news")
 
@@ -26,11 +27,8 @@ def preprocess_text(text: str) -> str:
     Cleans and standardizes article text prior to feature extraction.
     Removes excessive whitespaces, URLs, control characters, and standardizes casing.
     """
-    # Replace URLs with placeholder or remove
     cleaned = re.sub(r"https?://\S+|www\.\S+", "", text)
-    # Strip HTML tags if any were pasted
     cleaned = re.sub(r"<.*?>", "", cleaned)
-    # Normalize whitespaces and newlines
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned.lower()
 
@@ -38,8 +36,8 @@ def preprocess_text(text: str) -> str:
 class FakeNewsService:
     """
     Handles fake news text analysis via the fine-tuned DistilBERT model:
-    Lennywinks/fake-news-detector-english (or fallback vectorizer).
-    If no trained model artifacts are present on disk, returns an honest 'model_unavailable' status.
+    Lennywinks/fake-news-detector-english (or legacy fallback vectorizer).
+    If no trained model artifacts are present on disk, returns an honest model_unavailable status.
     """
 
     def __init__(self, models_dir: Path = MODELS_DIR):
@@ -63,25 +61,24 @@ class FakeNewsService:
             return
         self._load_attempted = True
 
-        # 1. Attempt loading genuine Transformers DistilBERT model
         local_hf_dir = self.models_dir / "fake_news_detector"
         if local_hf_dir.is_dir() and (local_hf_dir / "config.json").is_file():
             try:
-                from transformers import AutoTokenizer, AutoModelForSequenceClassification
+                from transformers import AutoModelForSequenceClassification, AutoTokenizer
                 import torch
 
                 logger.info(f"Loading genuine DistilBERT fake news model from {local_hf_dir}")
                 self._tokenizer = AutoTokenizer.from_pretrained(str(local_hf_dir))
                 self._hf_model = AutoModelForSequenceClassification.from_pretrained(str(local_hf_dir))
                 self._hf_model.eval()
-                logger.info("Successfully loaded Lennywinks/fake-news-detector-english model.")
+                logger.info(f"Successfully loaded {HF_MODEL_ID} model with id2label: {self._hf_model.config.id2label}")
                 return
             except Exception as e:
                 logger.warning(f"Failed to load DistilBERT model from {local_hf_dir}: {e}")
                 self._hf_model = None
                 self._tokenizer = None
 
-        # 2. Check for legacy joblib model artifacts
+        # Check for legacy joblib model artifacts
         model_paths = [self.models_dir / "fake_news_model.joblib"]
         vectorizer_paths = [self.models_dir / "fake_news_vectorizer.joblib"]
 
@@ -90,7 +87,7 @@ class FakeNewsService:
 
         if found_model and found_vec:
             try:
-                import joblib  # type: ignore
+                import joblib
 
                 self._legacy_model = joblib.load(found_model)
                 self._legacy_vectorizer = joblib.load(found_vec)
@@ -112,15 +109,121 @@ class FakeNewsService:
             self._hf_model = model
         self._load_attempted = True
 
+    def _get_label_mapping(self) -> Tuple[int, int]:
+        """
+        Extracts the exact indices for real and fake classes from the model config.
+        Never assumes index 0 is Real or Fake.
+        """
+        raw_id2label = getattr(self._hf_model.config, "id2label", {0: "fake", 1: "real"})
+        # Normalize keys to ints
+        mapping = {}
+        for k, v in raw_id2label.items():
+            idx = int(k) if str(k).isdigit() else k
+            mapping[idx] = str(v).lower()
+
+        real_idx = next((k for k, v in mapping.items() if "real" in v or "true" in v or "authentic" in v), 1)
+        fake_idx = next((k for k, v in mapping.items() if "fake" in v or "false" in v or "misleading" in v), 0)
+        return real_idx, fake_idx
+
+    def detect_fakenews(self, raw_text: str) -> FakeNewsDetectResponse:
+        """
+        Implements POST /api/fakenews/detect.
+        Evaluates news claim or text with the fine-tuned DistilBERT classifier.
+        """
+        if not isinstance(raw_text, str):
+            raise ValidationError("News text must be a string.")
+        cleaned = raw_text.strip()
+        if not cleaned:
+            raise ValidationError("Please provide a news article or claim to analyze.")
+        if len(cleaned) < 10:
+            raise ValidationError("Please enter at least 10 characters to analyze.")
+        if len(cleaned) > 20000:
+            raise ValidationError("Text exceeds maximum allowed length of 20,000 characters.")
+
+        if not self.is_model_available():
+            raise ValidationError("Fake news detection model is currently unavailable on the server.")
+
+        # Language inspection: detect Hindi / Devanagari script
+        has_hindi = bool(re.search(r"[ऀ-ॿ]", cleaned))
+        limitations: list[str] = []
+        if has_hindi:
+            limitations.append(
+                "Model is specialized for English language text. Devanagari/Hindi input has limited classification reliability."
+            )
+
+        if self._hf_model is not None and self._tokenizer is not None:
+            import torch
+
+            inputs = self._tokenizer(
+                cleaned,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+            )
+            with torch.no_grad():
+                logits = self._hf_model(**inputs).logits[0]
+                probs = torch.softmax(logits, dim=-1)
+
+            real_idx, fake_idx = self._get_label_mapping()
+            prob_real = float(probs[real_idx].item())
+            prob_fake = float(probs[fake_idx].item())
+
+            if prob_fake > prob_real:
+                api_label = "potentially_false"
+                confidence = round(prob_fake, 2)
+                explanation = (
+                    f"DistilBERT evaluated this content and identified linguistic patterns and stylistic features "
+                    f"predominantly found in misinformation datasets (model confidence: {confidence:.0%}). "
+                    "This is a model-based classification; independent verification is still required before treating as fact."
+                )
+            else:
+                api_label = "potentially_authentic"
+                confidence = round(prob_real, 2)
+                explanation = (
+                    f"DistilBERT evaluated this content and identified structural and stylistic characteristics "
+                    f"consistent with factual reporting (model confidence: {confidence:.0%}). "
+                    "Independent verification is still required for critical claims."
+                )
+
+            if has_hindi:
+                explanation += " Note: Input contains Hindi text which this English-specialized model does not natively support."
+
+            return FakeNewsDetectResponse(
+                success=True,
+                label=api_label,
+                confidence=confidence,
+                model="distilbert-fake-news-detector-english",
+                explanation=explanation,
+                verification_status="unverified",
+                limitations=limitations,
+            )
+
+        # Legacy model fallback
+        cleaned_text = preprocess_text(cleaned)
+        features = self._legacy_vectorizer.transform([cleaned_text])
+        prediction = self._legacy_model.predict(features)[0]
+        confidence = 0.85
+        if hasattr(self._legacy_model, "predict_proba"):
+            confidence = float(max(self._legacy_model.predict_proba(features)[0]))
+
+        api_label = "potentially_false" if "fake" in str(prediction).lower() else "potentially_authentic"
+        return FakeNewsDetectResponse(
+            success=True,
+            label=api_label,
+            confidence=round(confidence, 2),
+            model="legacy-fake-news-classifier",
+            explanation="Model-based classification; independent verification is still required.",
+            verification_status="unverified",
+            limitations=limitations,
+        )
+
     def analyze(self, raw_text: str) -> FakeNewsDetectionResult:
         """
-        Processes news text. Returns genuine model prediction if model is loaded,
-        or 'model_unavailable' status without fabricating predictions.
+        Processes news text for legacy /api/fake-news/analyze route.
         """
         validated_text = validate_news_input(raw_text)
 
         if not self.is_model_available():
-            # Honest, transparent behavior required by specification
             return FakeNewsDetectionResult(
                 success=True,
                 detector="fake_news",
@@ -136,7 +239,6 @@ class FakeNewsService:
                 recommendations=NEWS_RECOMMENDATIONS,
             )
 
-        # Genuine DistilBERT Transformers inference
         if self._hf_model is not None and self._tokenizer is not None:
             try:
                 import torch
@@ -148,16 +250,16 @@ class FakeNewsService:
                     max_length=512,
                 )
                 with torch.no_grad():
-                    logits = self._hf_model(**inputs).logits
-                    probs = torch.softmax(logits, dim=-1)[0]
+                    logits = self._hf_model(**inputs).logits[0]
+                    probs = torch.softmax(logits, dim=-1)
 
-                pred_idx = int(torch.argmax(probs).item())
-                confidence = float(probs[pred_idx].item())
-                raw_label = self._hf_model.config.id2label.get(pred_idx, str(pred_idx)).lower()
+                real_idx, fake_idx = self._get_label_mapping()
+                prob_real = float(probs[real_idx].item())
+                prob_fake = float(probs[fake_idx].item())
 
-                # High-fidelity label and explanation matching UI design
-                if raw_label == "fake":
+                if prob_fake > prob_real:
                     display_label = "Potentially Fake / Misleading"
+                    confidence = round(prob_fake, 3)
                     explanation = (
                         f"DistilBERT evaluated this content and identified linguistic patterns and stylistic features "
                         f"predominantly found in misinformation datasets (confidence score: {confidence:.1%}). "
@@ -165,6 +267,7 @@ class FakeNewsService:
                     )
                 else:
                     display_label = "Consistent with Authentic News"
+                    confidence = round(prob_real, 3)
                     explanation = (
                         f"DistilBERT evaluated this content and identified structural and linguistic characteristics "
                         f"consistent with factual reporting (confidence score: {confidence:.1%}). "
@@ -177,7 +280,8 @@ class FakeNewsService:
                     status="completed",
                     model_available=True,
                     label=display_label,
-                    confidence=round(confidence, 3),
+                    confidence=confidence,
+                    model="distilbert-fake-news-detector-english",
                     explanation=explanation,
                     recommendations=NEWS_RECOMMENDATIONS,
                 )
@@ -193,7 +297,6 @@ class FakeNewsService:
                     recommendations=NEWS_RECOMMENDATIONS,
                 )
 
-        # Legacy model inference (e.g. for mock unit tests)
         try:
             cleaned_text = preprocess_text(validated_text)
             features = self._legacy_vectorizer.transform([cleaned_text])
