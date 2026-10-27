@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { I, Ic, Shield3D } from '../components/Visuals'
 
 type State = 'empty' | 'selected' | 'analyzing' | 'results' | 'error'
-type ErrKind = 'type' | 'size' | 'unsupported' | 'model'
+type ErrKind = 'type' | 'size' | 'unsupported' | 'model' | 'connection'
 type Picked = { name: string; kind: 'image'; ext: string; size: string; url?: string }
 
 const IMG = ['png', 'jpg', 'jpeg', 'webp']
@@ -13,6 +13,7 @@ const ERRORS: Record<ErrKind, { t: string; d: string }> = {
   size: { t: 'File too large', d: 'Shown only once a size limit is configured. The limit will be confirmed during implementation.' },
   unsupported: { t: 'Unsupported media', d: 'The file could not be read as a valid image. It may be corrupted or use an unsupported format.' },
   model: { t: 'Analysis unavailable', d: 'No deepfake detection model is configured, so no analysis can be run and no result will be invented.' },
+  connection: { t: 'Backend connection failure', d: 'Could not connect to the backend at /api/deepfake/analyze. Please ensure the Python FastAPI server is running on port 8001.' },
 }
 
 const fmt = (b: number) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`)
@@ -42,11 +43,28 @@ export default function Deepfake() {
   const [state, setState] = useState<State>('empty')
   const [file, setFile] = useState<Picked | null>(null)
   const [rawFile, setRawFile] = useState<File | null>(null)
+  const [modelResult, setModelResult] = useState<{ label?: string | null; confidence?: number | null; explanation?: string } | null>(null)
   const [err, setErr] = useState<ErrKind>('type')
   const [drag, setDrag] = useState(false)
   const imgRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => () => { if (file?.url) URL.revokeObjectURL(file.url) }, [file])
+
+  useEffect(() => {
+    let mounted = true
+    fetch('/api/health')
+      .then((res) => {
+        if (!res.ok) throw new Error('Health check non-200')
+      })
+      .catch(() => {
+        if (!mounted) return
+        setErr('connection')
+        setState((prev) => (prev === 'empty' ? 'error' : prev))
+      })
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   const pick = (f?: File) => {
     if (!f) return
@@ -64,6 +82,7 @@ export default function Deepfake() {
   const clear = () => {
     setFile(null)
     setRawFile(null)
+    setModelResult(null)
     setState('empty')
   }
   const analyzeMedia = async () => {
@@ -87,21 +106,26 @@ export default function Deepfake() {
         }
         const data = await res.json()
         if (data.status === 'completed' && data.label) {
+          setModelResult(data)
           setState('results')
         } else {
+          setModelResult(null)
           setErr('model')
           setState('error')
         }
       } else {
+        setModelResult(null)
         setErr('model')
         setState('error')
       }
     } catch {
-      setErr('model')
+      setModelResult(null)
+      setErr('connection')
       setState('error')
     }
   }
   const demo = (s: State, e?: ErrKind) => {
+    setModelResult(null)
     if (e) setErr(e)
     if (s === 'empty') { setFile(null); setRawFile(null) }
     else if (!file) setFile({ name: 'filename.png', kind: 'image', ext: 'PNG', size: '—' })
@@ -213,25 +237,27 @@ export default function Deepfake() {
 
       {state === 'results' && (
         <section className="fadeup mt-6 space-y-6">
-          <p className="rounded-xl border border-violet/40 bg-violet/10 p-3 text-sm text-violet">Layout template only. No analysis was run and none of this content is a result.</p>
+          {!modelResult && (
+            <p className="rounded-xl border border-violet/40 bg-violet/10 p-3 text-sm text-violet">Layout template only. No analysis was run and none of this content is a result.</p>
+          )}
           <div className="glass rounded-3xl p-7">
             <p className="text-xs font-bold tracking-[0.18em] text-mute">RESULT CLASSIFICATION</p>
-            <p className="mt-3 text-3xl font-extrabold text-mute">[Result label from model]</p>
+            <p className="mt-3 text-3xl font-extrabold text-ink">{modelResult?.label || '[Result label from model]'}</p>
             <div className="mt-5 flex flex-wrap gap-2 text-xs font-bold">
-              <span className="rounded-full border border-rose-400/40 bg-rose-400/10 px-3 py-1 text-rose-300">Potentially AI-Generated</span>
-              <span className="rounded-full border border-amber-300/40 bg-amber-300/10 px-3 py-1 text-amber-300">Potentially Manipulated</span>
-              <span className="rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-300">No Strong Manipulation Signals Detected</span>
+              <span className={`rounded-full border px-3 py-1 ${modelResult?.label === 'Potentially AI-Generated' ? 'border-rose-400 bg-rose-400/30 text-rose-300 font-extrabold ring-1 ring-rose-400' : 'border-rose-400/40 bg-rose-400/10 text-rose-300'}`}>Potentially AI-Generated</span>
+              <span className={`rounded-full border px-3 py-1 ${modelResult?.label === 'Potentially Manipulated' ? 'border-amber-300 bg-amber-300/30 text-amber-300 font-extrabold ring-1 ring-amber-300' : 'border-amber-300/40 bg-amber-300/10 text-amber-300'}`}>Potentially Manipulated</span>
+              <span className={`rounded-full border px-3 py-1 ${modelResult?.label === 'No Strong Manipulation Signals Detected' ? 'border-emerald-400 bg-emerald-400/30 text-emerald-300 font-extrabold ring-1 ring-emerald-400' : 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300'}`}>No Strong Manipulation Signals Detected</span>
               <span className="rounded-full border border-line px-3 py-1 text-mute">Analysis Inconclusive</span>
             </div>
-            <div className="mt-5 h-2.5 rounded-full bg-line"><div className="h-full w-0 rounded-full bg-cyan" /></div>
-            <p className="mt-2 text-xs text-mute">Risk indicator. Populated only from real model output. No confidence value is shown.</p>
+            <div className="mt-5 h-2.5 rounded-full bg-line"><div className="h-full rounded-full bg-cyan transition-all duration-500" style={{ width: modelResult?.confidence ? `${Math.round(modelResult.confidence * 100)}%` : '0%' }} /></div>
+            <p className="mt-2 text-xs text-mute">Risk indicator. Populated only from real model output.{modelResult?.confidence ? ` Model confidence score: ${(modelResult.confidence * 100).toFixed(1)}%` : ' No confidence value is shown.'}</p>
           </div>
           <div className="grid gap-6 md:grid-cols-2">
             {[
-              ['Detected Indicators', 'Indicators reported by the model appear here, each with a plain-language explanation.'],
-              ['Analysis Explanation', 'A short description of what was examined and how to read the outcome.'],
+              ['Detected Indicators', modelResult ? 'Visual frequency and structural consistency patterns evaluated by Vision Transformer (ViT).' : 'Indicators reported by the model appear here, each with a plain-language explanation.'],
+              ['Analysis Explanation', modelResult?.explanation || 'A short description of what was examined and how to read the outcome.'],
               ['Recommended Next Steps', 'Find the original source, run a reverse image search, compare with trusted outlets.'],
-              ['Model Status', 'Model name and availability reported by the backend. Not configured in this prototype.'],
+              ['Model Status', modelResult ? 'Active (ViT Deepfake Detector v2 - ONNX)' : 'Model name and availability reported by the backend. Not configured in this prototype.'],
             ].map(([t, d]) => (
               <div key={t} className="glass rounded-3xl p-6">
                 <h3 className="font-extrabold">{t}</h3>

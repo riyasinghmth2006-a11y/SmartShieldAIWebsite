@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { I, Ic, Shield3D } from '../components/Visuals'
 
 type State = 'empty' | 'analyzing' | 'results' | 'error'
@@ -22,16 +22,38 @@ export default function Scam() {
   const [mode, setMode] = useState<Mode>('message')
   const [text, setText] = useState('')
   const [state, setState] = useState<State>('empty')
+  const [errorMsg, setErrorMsg] = useState('Please enter at least a few words or a full link to analyze.')
   const [result, setResult] = useState(analyze('', 'message'))
+  const isLive = useRef(false)
 
   useEffect(() => {
-    if (state !== 'analyzing') return
+    let mounted = true
+    fetch('/api/health')
+      .then((res) => {
+        if (!res.ok) throw new Error('Health check non-200')
+      })
+      .catch(() => {
+        if (!mounted) return
+        setErrorMsg('Backend connection failure: Could not connect to the backend at /api/health. Please ensure the Python FastAPI server is running on port 8001.')
+        setState((prev) => (prev === 'empty' ? 'error' : prev))
+      })
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (state !== 'analyzing' || isLive.current) return
     const t = setTimeout(() => setState('results'), 1800)
     return () => clearTimeout(t)
   }, [state])
 
   const run = async () => {
-    if (text.trim().length < 8) return setState('error')
+    if (text.trim().length < 8) {
+      setErrorMsg('Please enter at least a few words or a full link to analyze.')
+      return setState('error')
+    }
+    isLive.current = true
     setState('analyzing')
     try {
       const res = await fetch('/api/scam/analyze', {
@@ -39,17 +61,28 @@ export default function Scam() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode, content: text.trim() }),
       })
-      if (!res.ok) throw new Error('Analysis failed')
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}))
+        throw new Error(errJson.detail || 'Analysis failed on backend')
+      }
       const data = await res.json()
       setResult({ hits: data.hits || [], level: data.level || 'None found' })
       setState('results')
-    } catch {
-      setResult(analyze(text, mode))
-      setState('results')
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Analysis failed'
+      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('connection')) {
+        setErrorMsg('Backend service unreachable. Please ensure the Python server is running on port 8001.')
+      } else {
+        setErrorMsg(msg)
+      }
+      setState('error')
+    } finally {
+      isLive.current = false
     }
   }
 
   const demo = (s: State) => {
+    isLive.current = false
     if (s === 'results' && !text.trim()) {
       const sample = 'URGENT: Your account will be suspended within 24 hours. Verify your password at http://secure-login-bank-update.xyz or pay a processing fee in gift cards.'
       setMode('message')
@@ -98,7 +131,7 @@ export default function Scam() {
           />
           <div className="mt-2 flex items-center justify-between text-sm">
             {state === 'error' ? (
-              <p role="alert" className="flex items-center gap-2 font-semibold text-rose-400"><Ic d={I.warn} size={16} /> Please enter at least a few words or a full link to analyze.</p>
+              <p role="alert" className="flex items-center gap-2 font-semibold text-rose-400"><Ic d={I.warn} size={16} /> {errorMsg}</p>
             ) : <span />}
             <span className="text-mute">{text.length} / {MAX}</span>
           </div>

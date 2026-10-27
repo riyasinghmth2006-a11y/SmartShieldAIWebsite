@@ -1,4 +1,12 @@
 [
+  "backend/tests/test_api_integration.py::test_deepfake_disguised_script_rejected",
+  "backend/tests/test_api_integration.py::test_deepfake_no_file_uploaded",
+  "backend/tests/test_api_integration.py::test_fake_news_validation_error_short",
+  "backend/tests/test_api_integration.py::test_health_endpoints",
+  "backend/tests/test_api_integration.py::test_scam_invalid_mode",
+  "backend/tests/test_api_integration.py::test_scam_missing_content",
+  "backend/tests/test_api_integration.py::test_scam_validation_error_short",
+  "backend/tests/test_deepfake_service.py::test_api_deepfake_corrupt_stream_returns_400",
   "backend/tests/test_deepfake_service.py::test_api_deepfake_endpoint",
   "backend/tests/test_deepfake_service.py::test_corrupt_magic_bytes_rejected",
   "backend/tests/test_deepfake_service.py::test_empty_file_rejected",

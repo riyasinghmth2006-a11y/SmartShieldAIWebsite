@@ -8,8 +8,10 @@ This directory is designated for trained model weights and vectorizers.
 
 To enable active fake news classification, place your trained model artifacts here:
 
-- `fake_news_model.joblib` (or `.pkl`) — Trained scikit-learn / LightGBM classifier.
-- `fake_news_vectorizer.joblib` (or `.pkl`) — Fitted `TfidfVectorizer` or `CountVectorizer`.
+- `fake_news_model.joblib` — Trained scikit-learn / LightGBM classifier.
+- `fake_news_vectorizer.joblib` — Fitted `TfidfVectorizer` or `CountVectorizer`.
+
+*Note: Raw arbitrary `.pkl` files are disallowed for security to prevent unsafe deserialization.*
 
 #### Example Export in Python:
 ```python
@@ -29,8 +31,8 @@ joblib.dump(vectorizer, "backend/models/fake_news_vectorizer.joblib")
 
 ### 2. Deepfake Image Detection Model
 
-To enable media classification, place supported weights here:
-- `deepfake_image_model.onnx` or `.pt`
+To enable media classification, place safe ONNX weights here:
+- `deepfake_image_model.onnx` — Open Neural Network Exchange standard format (safe graph runtime, no arbitrary code execution).
 
 ---
 

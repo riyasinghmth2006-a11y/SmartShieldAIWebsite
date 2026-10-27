@@ -66,31 +66,31 @@ pip install -r backend/requirements.txt
 
 ## 3. Running the Backend Server
 
-The FastAPI backend runs on `127.0.0.1:8000`.
+The FastAPI backend runs on `127.0.0.1:8001` (to prevent conflicts with common container control plane ports).
 
 ### Linux / macOS
 ```bash
-python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
 ### Windows (PowerShell)
 ```powershell
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
-Interactive Swagger API documentation is available at `http://127.0.0.1:8000/api/docs`.
+Interactive Swagger API documentation is available at `http://127.0.0.1:8001/api/docs`.
 
 ---
 
 ## 4. How the Frontend Connects
 
-The React + Vite frontend runs on port `3000`. In `vite.config.ts`, requests matching `/api/*` are automatically proxied to `http://127.0.0.1:8000`:
+The React + Vite frontend runs on port `3000`. In `vite.config.ts`, requests matching `/api/*` are automatically proxied to `http://127.0.0.1:8001`:
 
 ```typescript
 server: {
   proxy: {
     '/api': {
-      target: 'http://127.0.0.1:8000',
+      target: 'http://127.0.0.1:8001',
       changeOrigin: true,
     },
   },
@@ -104,29 +104,40 @@ This guarantees:
 
 ---
 
-## 5. Adding Trained Machine Learning Models
+## 5. Machine Learning Models & Architecture
 
-Place model files into `backend/models/`:
+SmartShield AI integrates genuine open-source pretrained models stored locally in `backend/models/`:
 
-### Fake News Classifier
-- `fake_news_model.joblib` — Trained scikit-learn classification pipeline.
-- `fake_news_vectorizer.joblib` — Matching fitted text vectorizer.
+### 1. Fake News Classifier (`backend/models/fake_news_detector/`)
+- **Model**: `Lennywinks/fake-news-detector-english`
+- **Architecture**: `DistilBertForSequenceClassification` (`distilbert-base-cased` fine-tuned on 63k English articles from WELFake and WebzIO).
+- **License**: MIT
+- **Task**: Binary text classification (`0: fake`, `1: real`).
+- **Inference Runtime**: Hugging Face `transformers` + PyTorch CPU (`AutoModelForSequenceClassification`). Max token length: 512.
+- **Label Mapping**:
+  - `fake` -> `"Potentially Fake / Misleading"`
+  - `real` -> `"Consistent with Authentic News"`
+- **Fallback**: If the directory is removed, the service returns `status: "model_unavailable"` without guessing.
 
-When these files are absent, the API returns:
-```json
-{
-  "success": true,
-  "detector": "fake_news",
-  "status": "model_unavailable",
-  "model_available": false,
-  "explanation": "No trained classification model is loaded right now...",
-  "recommendations": [...]
-}
-```
-SmartShield AI **never fabricates predictions or displays fake confidence scores**.
+### 2. Deepfake Image Detector (`backend/models/deepfake_detector_v2/`)
+- **Model**: `onnx-community/Deep-Fake-Detector-v2-Model-ONNX`
+- **Architecture**: ViT (`ViTForImageClassification`, base `prithivMLmods/Deep-Fake-Detector-v2-Model`).
+- **License**: Apache 2.0
+- **Task**: Binary image classification (`0: Realism`, `1: Deepfake`).
+- **Format**: Standard ONNX model (`model_quantized.onnx`, 83.3 MB int8 quantized for fast CPU inference).
+- **Inference Runtime**: Python `onnxruntime` with `CPUExecutionProvider`.
+- **Preprocessing Pipeline**:
+  - Convert to RGB
+  - Bilinear resize to 224x224
+  - Rescale `1/255`
+  - Normalize with `mean=[0.5, 0.5, 0.5]`, `std=[0.5, 0.5, 0.5]`
+  - Tensor shape: `(1, 3, 224, 224)` float32
+- **Label Mapping**:
+  - Manipulation probability >= 70%: `"Potentially AI-Generated"`
+  - Manipulation probability 50-70%: `"Potentially Manipulated"`
+  - Authenticity probability > 50%: `"No Strong Manipulation Signals Detected"`
+- **Fallback**: If the ONNX file is removed, the service returns `status: "model_unavailable"`.
 
-### Deepfake Detection Model
-- Place supported ONNX or PyTorch weights into `backend/models/deepfake_image_model.onnx`.
 
 ---
 

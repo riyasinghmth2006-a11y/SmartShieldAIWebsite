@@ -58,6 +58,7 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
 # Health Endpoint
 # ==========================================
 
+@app.get("/health", response_model=HealthStatus, tags=["Health"])
 @app.get(f"{API_PREFIX}/health", response_model=HealthStatus, tags=["Health"])
 async def health_check():
     """Returns system status and model readiness."""

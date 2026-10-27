@@ -10,7 +10,7 @@ MODELS_DIR = BASE_DIR / "models"
 # Server configuration
 API_PREFIX = "/api"
 HOST = os.getenv("SMARTSHIELD_HOST", "127.0.0.1")
-PORT = int(os.getenv("SMARTSHIELD_PORT", "8000"))
+PORT = int(os.getenv("SMARTSHIELD_PORT", "8001"))
 
 # Allowed CORS origins
 ALLOWED_ORIGINS = [
